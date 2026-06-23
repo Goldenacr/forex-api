@@ -1,13 +1,13 @@
 {
-  "name": "aviator-api",
+  "name": "forex-api",
   "version": "1.0.0",
-  "description": "forex API",
-  "main": "api-aviator.js",
+  "main": "api-forex.js",
   "scripts": {
-    "start": "node api-aviator.js"
+    "start": "node api-forex.js"
   },
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5"
-  }
+  },
+  "license": "MIT"
 }
