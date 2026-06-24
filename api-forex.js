@@ -19,6 +19,9 @@ async function connectDB() {
         await client.connect();
         db = client.db(DB_NAME);
         console.log('✅ MongoDB Connected - Forex API');
+        
+        // Wait a moment to ensure collections are accessible, then initialize charts
+        await initCharts();
     } catch (e) {
         console.error('MongoDB connection error:', e.message);
     }
@@ -41,14 +44,38 @@ const VOLATILITY = { 'EURUSD': 0.0003, 'GBPUSD': 0.0005, 'AUDUSD': 0.0004, 'USDJ
 async function initCharts() {
     try {
         const col = chartsCol();
-        if (!col) return;
+        if (!col) {
+            console.error('❌ Charts collection not available');
+            return;
+        }
+        
+        console.log('🔄 Initializing charts...');
+        let created = 0;
+        let existing = 0;
+        
         for (const pair of PAIRINGS) {
             const exists = await col.findOne({ pair });
             if (!exists) {
-                await col.insertOne({ pair, price: BASE_PRICES[pair], history: [], timestamp: Date.now() });
+                const newChart = {
+                    pair,
+                    price: BASE_PRICES[pair],
+                    history: [{
+                        price: BASE_PRICES[pair],
+                        time: Date.now()
+                    }],
+                    timestamp: Date.now()
+                };
+                await col.insertOne(newChart);
+                created++;
+                console.log(`✅ Created chart for ${pair} at price ${BASE_PRICES[pair]}`);
+            } else {
+                existing++;
             }
         }
-    } catch (e) {}
+        console.log(`📊 Charts initialized: ${created} created, ${existing} already existed`);
+    } catch (e) {
+        console.error('❌ Error initializing charts:', e.message);
+    }
 }
 
 setInterval(async () => {
@@ -56,6 +83,14 @@ setInterval(async () => {
         const col = chartsCol();
         const fixedColRef = fixedCol();
         if (!col) return;
+        
+        // Check if charts exist, if not initialize them
+        const chartCount = await col.countDocuments();
+        if (chartCount === 0) {
+            console.log('⚠️ No charts found, reinitializing...');
+            await initCharts();
+            return;
+        }
         
         for (const pair of PAIRINGS) {
             const chart = await col.findOne({ pair });
@@ -80,7 +115,9 @@ setInterval(async () => {
         
         // Clean expired fixes
         if (fixedColRef) await fixedColRef.deleteMany({ until: { $lt: Date.now() } });
-    } catch (e) {}
+    } catch (e) {
+        console.error('Error in price update interval:', e.message);
+    }
 }, 1000);
 
 app.get('/charts', async (req, res) => {
@@ -234,11 +271,5 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok', service: 'forex-api', db: !!db, timestamp: Date.now() });
 });
 
-// Initialize charts on startup
-app.post('/charts/init', async (req, res) => {
-    await initCharts();
-    const col = chartsCol();
-    const charts = await col.find({}).toArray();
-    res.json({ success: true, pairs: charts.length });
-});
+// Initialize charts on startup is now handled in connectDB()
 app.listen(PORT, () => console.log(`💱 Forex API running on port ${PORT}`));
