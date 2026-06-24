@@ -235,5 +235,10 @@ app.get('/health', (req, res) => {
 });
 
 // Initialize charts on startup
-initCharts().then(() => console.log('📊 Charts initialized')).catch(e => console.error('Init error:', e));
+app.post('/charts/init', async (req, res) => {
+    await initCharts();
+    const col = chartsCol();
+    const charts = await col.find({}).toArray();
+    res.json({ success: true, pairs: charts.length });
+});
 app.listen(PORT, () => console.log(`💱 Forex API running on port ${PORT}`));
