@@ -234,5 +234,6 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok', service: 'forex-api', db: !!db, timestamp: Date.now() });
 });
 
-initCharts().catch(() => {});
+// Initialize charts on startup
+initCharts().then(() => console.log('📊 Charts initialized')).catch(e => console.error('Init error:', e));
 app.listen(PORT, () => console.log(`💱 Forex API running on port ${PORT}`));
