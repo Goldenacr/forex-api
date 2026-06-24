@@ -1,145 +1,238 @@
 const express = require('express');
-const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
+const { MongoClient } = require('mongodb');
 const app = express();
 const PORT = process.env.PORT || 3003;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
-const DATA_DIR = path.join(__dirname, 'data');
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+const MONGO_URI = 'mongodb+srv://richvybs18:Fuckyou2026%24@cluster0.cq4ddne.mongodb.net/?appName=Cluster0';
+const DB_NAME = 'forex';
+let db;
 
-function load(f) { try { if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) {} return {}; }
-function save(f, d) { fs.writeFileSync(f, JSON.stringify(d, null, 2)); }
+async function connectDB() {
+    try {
+        const client = new MongoClient(MONGO_URI);
+        await client.connect();
+        db = client.db(DB_NAME);
+        console.log('✅ MongoDB Connected - Forex API');
+    } catch (e) {
+        console.error('MongoDB connection error:', e.message);
+    }
+}
+connectDB();
 
-// Charts
+function tradersCol() { return db?.collection('traders'); }
+function chartsCol() { return db?.collection('charts'); }
+function positionsCol() { return db?.collection('positions'); }
+function capitalCol() { return db?.collection('capital'); }
+function loansCol() { return db?.collection('loans'); }
+function depositsCol() { return db?.collection('deposits'); }
+function fixedCol() { return db?.collection('fixed'); }
+
+// ======================== CHARTS ========================
 const PAIRINGS = ['EURUSD', 'GBPUSD', 'AUDUSD', 'USDJPY', 'USDCAD', 'NZDUSD', 'EURGBP'];
 const BASE_PRICES = { 'EURUSD': 1.0850, 'GBPUSD': 1.2650, 'AUDUSD': 0.6580, 'USDJPY': 151.50, 'USDCAD': 1.3580, 'NZDUSD': 0.6050, 'EURGBP': 0.8570 };
 const VOLATILITY = { 'EURUSD': 0.0003, 'GBPUSD': 0.0005, 'AUDUSD': 0.0004, 'USDJPY': 0.0300, 'USDCAD': 0.0004, 'NZDUSD': 0.0005, 'EURGBP': 0.0003 };
 
-// Initialize charts
-function initCharts() {
-    const charts = load(path.join(DATA_DIR, 'charts.json'));
-    for (const pair of PAIRINGS) {
-        if (!charts[pair]) charts[pair] = { price: BASE_PRICES[pair], history: [], timestamp: Date.now() };
-    }
-    save(path.join(DATA_DIR, 'charts.json'), charts);
+async function initCharts() {
+    try {
+        const col = chartsCol();
+        if (!col) return;
+        for (const pair of PAIRINGS) {
+            const exists = await col.findOne({ pair });
+            if (!exists) {
+                await col.insertOne({ pair, price: BASE_PRICES[pair], history: [], timestamp: Date.now() });
+            }
+        }
+    } catch (e) {}
 }
-initCharts();
 
-// Update charts every second
-setInterval(() => {
-    const charts = load(path.join(DATA_DIR, 'charts.json'));
-    const fixed = load(path.join(DATA_DIR, 'fixed.json'));
-    const now = Date.now();
-    
-    for (const pair of PAIRINGS) {
-        let direction = 0;
-        if (fixed[pair] && now < fixed[pair].until) {
-            direction = fixed[pair].direction === 'UP' ? 1 : -1;
+setInterval(async () => {
+    try {
+        const col = chartsCol();
+        const fixedColRef = fixedCol();
+        if (!col) return;
+        
+        for (const pair of PAIRINGS) {
+            const chart = await col.findOne({ pair });
+            if (!chart) continue;
+            
+            let direction = 0;
+            const fixed = fixedColRef ? await fixedColRef.findOne({ pair }) : null;
+            if (fixed && Date.now() < fixed.until) {
+                direction = fixed.direction === 'UP' ? 1 : -1;
+            }
+            
+            const vol = VOLATILITY[pair];
+            let change = direction !== 0 ? (Math.random() < 0.7 ? direction : -direction) * vol : (Math.random() - 0.5) * vol * 2;
+            chart.price += change;
+            chart.price = Math.round(chart.price * 100000) / 100000;
+            chart.timestamp = Date.now();
+            chart.history = (chart.history || []).slice(-99);
+            chart.history.push({ price: chart.price, time: Date.now() });
+            
+            await col.updateOne({ pair }, { $set: chart });
         }
         
-        const vol = VOLATILITY[pair];
-        let change = direction !== 0 ? (Math.random() < 0.7 ? direction : -direction) * vol : (Math.random() - 0.5) * vol * 2;
-        charts[pair].price += change;
-        charts[pair].price = Math.round(charts[pair].price * 100000) / 100000;
-        charts[pair].timestamp = now;
-        charts[pair].history = (charts[pair].history || []).slice(-100);
-        charts[pair].history.push({ price: charts[pair].price, time: now });
-    }
-    
-    save(path.join(DATA_DIR, 'charts.json'), charts);
+        // Clean expired fixes
+        if (fixedColRef) await fixedColRef.deleteMany({ until: { $lt: Date.now() } });
+    } catch (e) {}
 }, 1000);
 
-app.get('/charts', (req, res) => {
-    res.json({ success: true, charts: load(path.join(DATA_DIR, 'charts.json')) });
+app.get('/charts', async (req, res) => {
+    try {
+        const col = chartsCol();
+        if (!col) return res.json({ success: true, charts: {} });
+        const charts = await col.find({}).toArray();
+        const result = {};
+        charts.forEach(c => { result[c.pair] = { price: c.price, history: c.history, timestamp: c.timestamp }; });
+        res.json({ success: true, charts: result });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.post('/charts/fix', (req, res) => {
-    const { pair, direction, until } = req.body;
-    const fixed = load(path.join(DATA_DIR, 'fixed.json'));
-    fixed[pair] = { direction, until, setAt: Date.now() };
-    save(path.join(DATA_DIR, 'fixed.json'), fixed);
-    res.json({ success: true });
+app.post('/charts/fix', async (req, res) => {
+    try {
+        const { pair, direction, until } = req.body;
+        const col = fixedCol();
+        if (col) await col.updateOne({ pair }, { $set: { pair, direction, until, setAt: Date.now() } }, { upsert: true });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// Traders
-app.get('/traders', (req, res) => {
-    res.json({ success: true, traders: load(path.join(DATA_DIR, 'traders.json')) });
-});
-app.post('/traders/sync', (req, res) => {
-    const traders = load(path.join(DATA_DIR, 'traders.json'));
-    if (req.body.trader) traders[req.body.trader.jid] = req.body.trader;
-    save(path.join(DATA_DIR, 'traders.json'), traders);
-    res.json({ success: true });
-});
-
-// Capital
-app.get('/capital', (req, res) => {
-    res.json({ success: true, capital: load(path.join(DATA_DIR, 'capital.json')) });
-});
-app.post('/capital/update', (req, res) => {
-    const cap = load(path.join(DATA_DIR, 'capital.json'));
-    cap.balance = (cap.balance || 5000) + (req.body.amount || 0);
-    cap.totalPL = (cap.totalPL || 0) + (req.body.pl || 0);
-    if (req.body.type === 'loss') cap.revenue = (cap.revenue || 0) + Math.abs(req.body.amount || 0);
-    save(path.join(DATA_DIR, 'capital.json'), cap);
-    res.json({ success: true });
+// ======================== TRADERS ========================
+app.get('/traders', async (req, res) => {
+    try {
+        const col = tradersCol();
+        if (!col) return res.json({ success: true, traders: {} });
+        const traders = await col.find({}).toArray();
+        const result = {};
+        traders.forEach(t => { result[t.jid] = t; delete result[t.jid]._id; });
+        res.json({ success: true, traders: result, total: traders.length });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// Positions
-const POSITIONS_FILE = path.join(DATA_DIR, 'positions.json');
-
-app.get('/positions', (req, res) => {
-    res.json({ success: true, positions: load(POSITIONS_FILE) });
+app.post('/traders/sync', async (req, res) => {
+    try {
+        const { trader, botId } = req.body;
+        if (!trader?.jid) return res.status(400).json({ success: false });
+        trader.botId = botId;
+        trader.syncedAt = Date.now();
+        const col = tradersCol();
+        if (col) await col.updateOne({ jid: trader.jid }, { $set: trader }, { upsert: true });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.post('/positions/sync', (req, res) => {
-    const positions = load(POSITIONS_FILE);
-    const pos = req.body.position;
-    if (pos) positions[pos.id] = pos;
-    save(POSITIONS_FILE, positions);
-    res.json({ success: true });
+// ======================== CAPITAL ========================
+app.get('/capital', async (req, res) => {
+    try {
+        const col = capitalCol();
+        if (!col) return res.json({ success: true, capital: { balance: 5000 } });
+        const cap = await col.findOne({ type: 'main' }) || { balance: 5000, totalGiven: 0, totalPL: 0, revenue: 0 };
+        delete cap._id;
+        res.json({ success: true, capital: cap });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.post('/positions/update', (req, res) => {
-    const { positionId, updates } = req.body;
-    const positions = load(POSITIONS_FILE);
-    if (positions[positionId]) {
-        Object.assign(positions[positionId], updates);
-        save(POSITIONS_FILE, positions);
-    }
-    res.json({ success: true });
+app.post('/capital/update', async (req, res) => {
+    try {
+        const { amount, pl, type } = req.body;
+        const col = capitalCol();
+        if (!col) return res.json({ success: true });
+        const cap = await col.findOne({ type: 'main' }) || { balance: 5000, totalGiven: 0, totalPL: 0, revenue: 0 };
+        cap.balance = (cap.balance || 5000) + (amount || 0);
+        cap.totalPL = (cap.totalPL || 0) + (pl || 0);
+        if (type === 'loss') cap.revenue = (cap.revenue || 0) + Math.abs(amount || 0);
+        await col.updateOne({ type: 'main' }, { $set: cap }, { upsert: true });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-app.post('/positions/delete', (req, res) => {
-    const { positionId } = req.body;
-    const positions = load(POSITIONS_FILE);
-    delete positions[positionId];
-    save(POSITIONS_FILE, positions);
-    res.json({ success: true });
+// ======================== POSITIONS ========================
+app.get('/positions', async (req, res) => {
+    try {
+        const col = positionsCol();
+        if (!col) return res.json({ success: true, positions: {} });
+        const positions = await col.find({}).toArray();
+        const result = {};
+        positions.forEach(p => { result[p.id] = p; delete result[p.id]._id; });
+        res.json({ success: true, positions: result });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// Loans
-app.post('/loans/broadcast', (req, res) => {
-    const loans = load(path.join(DATA_DIR, 'loans.json'));
-    loans[req.body.loan.id] = req.body.loan;
-    save(path.join(DATA_DIR, 'loans.json'), loans);
-    res.json({ success: true });
+app.post('/positions/sync', async (req, res) => {
+    try {
+        const { position, botId } = req.body;
+        if (!position?.id) return res.status(400).json({ success: false });
+        position.botId = botId;
+        const col = positionsCol();
+        if (col) await col.updateOne({ id: position.id }, { $set: position }, { upsert: true });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// Deposits
-app.post('/deposits/broadcast', (req, res) => {
-    const deposits = load(path.join(DATA_DIR, 'deposits.json'));
-    deposits[req.body.deposit.id] = req.body.deposit;
-    save(path.join(DATA_DIR, 'deposits.json'), deposits);
-    res.json({ success: true });
+app.post('/positions/update', async (req, res) => {
+    try {
+        const { positionId, updates } = req.body;
+        const col = positionsCol();
+        if (col) await col.updateOne({ id: positionId }, { $set: updates });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// ======================== LOANS & DEPOSITS ========================
+app.get('/loans', async (req, res) => {
+    try {
+        const col = loansCol();
+        if (!col) return res.json({ success: true, loans: {} });
+        const loans = await col.find({}).toArray();
+        const result = {};
+        loans.forEach(l => { result[l.id] = l; delete result[l.id]._id; });
+        res.json({ success: true, loans: result });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+app.post('/loans/broadcast', async (req, res) => {
+    try {
+        const { loan, botId } = req.body;
+        if (!loan?.id) return res.status(400).json({ success: false });
+        loan.botId = botId;
+        const col = loansCol();
+        if (col) await col.updateOne({ id: loan.id }, { $set: loan }, { upsert: true });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+app.get('/deposits', async (req, res) => {
+    try {
+        const col = depositsCol();
+        if (!col) return res.json({ success: true, deposits: {} });
+        const deposits = await col.find({}).toArray();
+        const result = {};
+        deposits.forEach(d => { result[d.id] = d; delete result[d.id]._id; });
+        res.json({ success: true, deposits: result });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+app.post('/deposits/broadcast', async (req, res) => {
+    try {
+        const { deposit, botId } = req.body;
+        if (!deposit?.id) return res.status(400).json({ success: false });
+        deposit.botId = botId;
+        const col = depositsCol();
+        if (col) await col.updateOne({ id: deposit.id }, { $set: deposit }, { upsert: true });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ======================== HEALTH ========================
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', service: 'forex-api', timestamp: Date.now() });
+    res.json({ status: 'ok', service: 'forex-api', db: !!db, timestamp: Date.now() });
 });
 
+initCharts().catch(() => {});
 app.listen(PORT, () => console.log(`💱 Forex API running on port ${PORT}`));
